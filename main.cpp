@@ -1,346 +1,366 @@
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <LearnOpenGL/stb_image.h>
-
+#include <LearnOpenGL/glad.c>
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
-#include <glm/gtc/type_ptr.hpp>
-#include <LearnOpenGL/glad.c>
-#include <LearnOpenGL/shader.h>
-#include <LearnOpenGL/camera.h>
-#include <LearnOpenGL/model.h>
+#include <glm/gtx/quaternion.hpp>
 
+#include<LearnOpenGL/shader.h>
 #include <iostream>
+#include <memory>
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
 void mouse_callback(GLFWwindow* window, double xpos, double ypos);
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
-void processInput(GLFWwindow *window);
+GLFWwindow* initWindow(int width, int height, const char* title);
+void processInput(GLFWwindow* window, float deltaTime);
+glm::quat myQuatLookAt(glm::vec3 direction, glm::vec3 up);
 unsigned int loadTexture(const char *path);
-void renderSphere();
 
-// settings
-const unsigned int SCR_WIDTH = 1280;
-const unsigned int SCR_HEIGHT = 720;
+// 自定义四元数摄像机类
+class QuaternionCamera {
+public:
+    // 构造函数
+    QuaternionCamera(glm::vec3 position = glm::vec3(0.0f, 0.0f, 3.0f),float sensitivity = 0.1f,float speed = 2.5f)
+        : position(position),rotation(glm::quat(1.0f, 0.0f, 0.0f, 0.0f)),sensitivity(sensitivity),movementSpeed(speed),fov(45.0f){}
 
-// camera
-Camera camera(glm::vec3(0.0f, 0.0f, 3.0f));
-float lastX = 800.0f / 2.0;
-float lastY = 600.0 / 2.0;
+    // 处理鼠标输入
+    void processMouseMovement(float xOffset, float yOffset, bool constrainPitch = true) {
+        xOffset *= sensitivity;
+        yOffset *= sensitivity;
+
+        // 绕世界Y轴旋转（偏航）
+        glm::quat yaw = glm::angleAxis(glm::radians(-xOffset), glm::vec3(0.0f, 1.0f, 0.0f));
+        rotation = yaw * rotation;
+
+        // 绕本地右轴旋转（俯仰）
+        glm::vec3 right = getRightVector();
+        glm::quat pitch = glm::angleAxis(glm::radians(-yOffset), right);
+        rotation = rotation * pitch;
+
+        // 保持单位四元数
+        rotation = glm::normalize(rotation);
+
+        if (constrainPitch) {
+            constrainPitchAngle();
+        }
+    }
+
+    // 处理键盘输入
+    void processKeyboard(int key, float deltaTime) {
+        float velocity = movementSpeed * deltaTime;
+        glm::vec3 front = getFrontVector();
+        glm::vec3 right = getRightVector();
+
+        switch (key) {
+        case GLFW_KEY_W:
+            position += front * velocity;
+            break;
+        case GLFW_KEY_S:
+            position -= front * velocity;
+            break;
+        case GLFW_KEY_A:
+            position -= right * velocity;
+            break;
+        case GLFW_KEY_D:
+            position += right * velocity;
+            break;
+        }
+    }
+
+    // 处理滚轮缩放
+    void processMouseScroll(float yOffset) {
+        fov -= yOffset;
+        fov = glm::clamp(fov, 1.0f, 45.0f);
+    }
+
+    // 获取视图矩阵
+    glm::mat4 getViewMatrix() const {
+        return glm::lookAt(position, position + getFrontVector(), getUpVector());
+    }
+
+    // 获取投影矩阵
+    glm::mat4 getProjectionMatrix(float aspectRatio) const {
+        return glm::perspective(glm::radians(fov), aspectRatio, 0.1f, 100.0f);
+    }
+
+    // 获取各方向向量
+    glm::vec3 getFrontVector() const { return rotation * glm::vec3(0.0f, 0.0f, -1.0f); }
+    glm::vec3 getUpVector() const    { return rotation * glm::vec3(0.0f, 1.0f, 0.0f); }
+    glm::vec3 getRightVector() const { return rotation * glm::vec3(1.0f, 0.0f, 0.0f); }
+
+    float getFOV() const { return fov; }
+
+private:
+    glm::vec3 position;
+    glm::quat rotation;
+    float sensitivity;
+    float movementSpeed;
+    float fov;
+
+    // 俯仰角限制
+    void constrainPitchAngle() {
+        glm::vec3 front = getFrontVector();
+        glm::vec3 frontXZ = glm::normalize(glm::vec3(front.x, 0.0f, front.z));
+        float pitch = glm::degrees(glm::asin(front.y));
+
+        const float maxPitch = 89.0f;
+        if (pitch > maxPitch || pitch < -maxPitch) {
+            front.y = glm::sin(glm::radians(glm::clamp(pitch, -maxPitch, maxPitch)));
+            front = glm::normalize(front);
+
+            // 重新构造四元数
+            glm::vec3 right = glm::normalize(glm::cross(front, glm::vec3(0.0f, 1.0f, 0.0f)));
+            glm::vec3 up = glm::normalize(glm::cross(right, front));
+            rotation = myQuatLookAt(front, up);
+        }
+    }
+};
+
+// 全局变量
+std::unique_ptr<QuaternionCamera> camera;
 bool firstMouse = true;
+float lastX = 800.0f / 2.0;
+float lastY = 600.0f / 2.0;
 
-// timing
-float deltaTime = 0.0f;
-float lastFrame = 0.0f;
 
-int main()
-{
-    // glfw: initialize and configure
-    // ------------------------------
-    glfwInit();
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
-    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
-    glfwWindowHint(GLFW_SAMPLES, 4);
-    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+int main() {
+    // 初始化窗口
+    GLFWwindow* window = initWindow(800, 600, "Quaternion Camera Demo");
+    if (!window) return -1;
 
-#ifdef __APPLE__
-    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
-#endif
+    // 初始化摄像机
+    camera = std::make_unique<QuaternionCamera>();
 
-    // glfw window creation
-    // --------------------
-    GLFWwindow* window = glfwCreateWindow(SCR_WIDTH, SCR_HEIGHT, "LearnOpenGL", NULL, NULL);
-    glfwMakeContextCurrent(window);
-    if (window == NULL)
-    {
-        std::cout << "Failed to create GLFW window" << std::endl;
-        glfwTerminate();
-        return -1;
-    }
-    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
-    glfwSetCursorPosCallback(window, mouse_callback);
-    glfwSetScrollCallback(window, scroll_callback);
-
-    // tell GLFW to capture our mouse
-    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
-
-    // glad: load all OpenGL function pointers
-    // ---------------------------------------
-    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress))
-    {
-        std::cout << "Failed to initialize GLAD" << std::endl;
-        return -1;
-    }
-
-    // configure global opengl state
-    // -----------------------------
+    // 配置全局OpenGL状态
     glEnable(GL_DEPTH_TEST);
 
-    // build and compile shaders
-    // -------------------------
-    Shader shader("D:/vscode/OpenGLvscode/shaderfiles/1.1.pbr.vs.txt", "D:/vscode/OpenGLvscode/shaderfiles/1.1.pbr.fs.txt");
+    Shader ourShader("D:/vscode/OpenGLvscode/shaderfiles/quaterion_Camera_vs.txt","D:/vscode/OpenGLvscode/shaderfiles/quaterion_Camera_fs.txt");
 
-    shader.use();
-    shader.setVec3("albedo", 0.5f, 0.0f, 0.0f);
-    shader.setFloat("ao", 1.0f);
+    // 设置顶点数据
+    float vertices[] = {
+        -0.5f, -0.5f, -0.5f,  0.0f, 0.0f,
+        0.5f, -0.5f, -0.5f,  1.0f, 0.0f,
+        0.5f,  0.5f, -0.5f,  1.0f, 1.0f,
+        0.5f,  0.5f, -0.5f,  1.0f, 1.0f,
+        -0.5f,  0.5f, -0.5f,  0.0f, 1.0f,
+        -0.5f, -0.5f, -0.5f,  0.0f, 0.0f,
 
-    // lights
-    // ------
-    glm::vec3 lightPositions[] = {
-        glm::vec3(-10.0f,  10.0f, 10.0f),
-        glm::vec3( 10.0f,  10.0f, 10.0f),
-        glm::vec3(-10.0f, -10.0f, 10.0f),
-        glm::vec3( 10.0f, -10.0f, 10.0f),
+        -0.5f, -0.5f,  0.5f,  0.0f, 0.0f,
+        0.5f, -0.5f,  0.5f,  1.0f, 0.0f,
+        0.5f,  0.5f,  0.5f,  1.0f, 1.0f,
+        0.5f,  0.5f,  0.5f,  1.0f, 1.0f,
+        -0.5f,  0.5f,  0.5f,  0.0f, 1.0f,
+        -0.5f, -0.5f,  0.5f,  0.0f, 0.0f,
+
+        -0.5f,  0.5f,  0.5f,  1.0f, 0.0f,
+        -0.5f,  0.5f, -0.5f,  1.0f, 1.0f,
+        -0.5f, -0.5f, -0.5f,  0.0f, 1.0f,
+        -0.5f, -0.5f, -0.5f,  0.0f, 1.0f,
+        -0.5f, -0.5f,  0.5f,  0.0f, 0.0f,
+        -0.5f,  0.5f,  0.5f,  1.0f, 0.0f,
+
+        0.5f,  0.5f,  0.5f,  1.0f, 0.0f,
+        0.5f,  0.5f, -0.5f,  1.0f, 1.0f,
+        0.5f, -0.5f, -0.5f,  0.0f, 1.0f,
+        0.5f, -0.5f, -0.5f,  0.0f, 1.0f,
+        0.5f, -0.5f,  0.5f,  0.0f, 0.0f,
+        0.5f,  0.5f,  0.5f,  1.0f, 0.0f,
+
+        -0.5f, -0.5f, -0.5f,  0.0f, 1.0f,
+        0.5f, -0.5f, -0.5f,  1.0f, 1.0f,
+        0.5f, -0.5f,  0.5f,  1.0f, 0.0f,
+        0.5f, -0.5f,  0.5f,  1.0f, 0.0f,
+        -0.5f, -0.5f,  0.5f,  0.0f, 0.0f,
+        -0.5f, -0.5f, -0.5f,  0.0f, 1.0f,
+
+        -0.5f,  0.5f, -0.5f,  0.0f, 1.0f,
+        0.5f,  0.5f, -0.5f,  1.0f, 1.0f,
+        0.5f,  0.5f,  0.5f,  1.0f, 0.0f,
+        0.5f,  0.5f,  0.5f,  1.0f, 0.0f,
+        -0.5f,  0.5f,  0.5f,  0.0f, 0.0f,
+        -0.5f,  0.5f, -0.5f,  0.0f, 1.0f
     };
-    glm::vec3 lightColors[] = {
-        glm::vec3(300.0f, 300.0f, 300.0f),
-        glm::vec3(300.0f, 300.0f, 300.0f),
-        glm::vec3(300.0f, 300.0f, 300.0f),
-        glm::vec3(300.0f, 300.0f, 300.0f)
+    // world space positions of our cubes
+    glm::vec3 cubePositions[] = {
+        glm::vec3( 0.0f,  0.0f,  0.0f),
+        glm::vec3( 2.0f,  5.0f, -15.0f),
+        glm::vec3(-1.5f, -2.2f, -2.5f),
+        glm::vec3(-3.8f, -2.0f, -12.3f),
+        glm::vec3( 2.4f, -0.4f, -3.5f),
+        glm::vec3(-1.7f,  3.0f, -7.5f),
+        glm::vec3( 1.3f, -2.0f, -2.5f),
+        glm::vec3( 1.5f,  2.0f, -2.5f),
+        glm::vec3( 1.5f,  0.2f, -1.5f),
+        glm::vec3(-1.3f,  1.0f, -1.5f)
     };
-    int nrRows    = 7;
-    int nrColumns = 7;
-    float spacing = 2.5;
 
-    // initialize static shader uniforms before rendering
-    // --------------------------------------------------
-    glm::mat4 projection = glm::perspective(glm::radians(camera.Zoom), (float)SCR_WIDTH / (float)SCR_HEIGHT, 0.1f, 100.0f);
-    shader.use();
-    shader.setMat4("projection", projection);
+    // 设置VBO/VAO
+    unsigned int VBO, VAO;
+    glGenVertexArrays(1, &VAO);
+    glGenBuffers(1, &VBO);
 
-    // render loop
-    // -----------
-    while (!glfwWindowShouldClose(window))
-    {
-        // per-frame time logic
-        // --------------------
-        float currentFrame = static_cast<float>(glfwGetTime());
-        deltaTime = currentFrame - lastFrame;
+    glBindVertexArray(VAO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(vertices), vertices, GL_STATIC_DRAW);
+
+    // 位置属性
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+
+    // 纹理坐标属性
+    glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, 5 * sizeof(float), (void*)(3 * sizeof(float)));
+    glEnableVertexAttribArray(1);
+
+    unsigned int texture1 = loadTexture("D:/vscode/OpenGLvscode/textures/container.jpg");
+    unsigned int texture2 = loadTexture("D:/vscode/OpenGLvscode/textures/smile.png");
+
+    // 配置着色器
+    ourShader.use();
+    ourShader.setInt("texture1", 0);
+    ourShader.setInt("texture2", 1);
+
+    // 主循环
+    while (!glfwWindowShouldClose(window)) {
+        // 时间计算
+        static float lastFrame = 0.0f;
+        float currentFrame = glfwGetTime();
+        float deltaTime = currentFrame - lastFrame;
         lastFrame = currentFrame;
 
-        // input
-        // -----
-        processInput(window);
+        // 输入处理
+        processInput(window, deltaTime);
 
-        // render
-        // ------
-        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+        // 清除缓冲
+        glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
 
-        shader.use();
-        glm::mat4 view = camera.GetViewMatrix();
-        shader.setMat4("view", view);
-        shader.setVec3("camPos", camera.Position);
+        // 绑定纹理
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, texture1);
+        glActiveTexture(GL_TEXTURE1);
+        glBindTexture(GL_TEXTURE_2D, texture2);
 
-        // render rows*column number of spheres with varying metallic/roughness values scaled by rows and columns respectively
-        glm::mat4 model = glm::mat4(1.0f);
-        for (int row = 0; row < nrRows; ++row) 
-        {
-            shader.setFloat("metallic", (float)row / (float)nrRows);
-            for (int col = 0; col < nrColumns; ++col) 
-            {
-                // we clamp the roughness to 0.05 - 1.0 as perfectly smooth surfaces (roughness of 0.0) tend to look a bit off
-                // on direct lighting.
-                shader.setFloat("roughness", glm::clamp((float)col / (float)nrColumns, 0.05f, 1.0f));
+        // 获取矩阵
+        glm::mat4 projection = camera->getProjectionMatrix(800.0f / 600.0f);
+        glm::mat4 view = camera->getViewMatrix();
 
-                model = glm::mat4(1.0f);
-                model = glm::translate(model, glm::vec3(
-                    (col - (nrColumns / 2)) * spacing, 
-                    (row - (nrRows / 2)) * spacing, 
-                    0.0f
-                ));
-                shader.setMat4("model", model);
-                shader.setMat3("normalMatrix", glm::transpose(glm::inverse(glm::mat3(model))));
-                renderSphere();
-            }
+        // 设置矩阵uniform
+        ourShader.use();
+        ourShader.setMat4("projection", projection);
+        ourShader.setMat4("view", view);
+
+        // 渲染立方体
+        glBindVertexArray(VAO);
+        for (unsigned int i = 0; i < 10; i++) {
+            glm::mat4 model = glm::mat4(1.0f);
+            model = glm::translate(model, cubePositions[i]);
+            float angle = 20.0f * i;
+            model = glm::rotate(model, glm::radians(angle), glm::vec3(1.0f, 0.3f, 0.5f));
+            ourShader.setMat4("model", model);
+            glDrawArrays(GL_TRIANGLES, 0, 36);
         }
 
-        // render light source (simply re-render sphere at light positions)
-        // this looks a bit off as we use the same shader, but it'll make their positions obvious and 
-        // keeps the codeprint small.
-        for (unsigned int i = 0; i < sizeof(lightPositions) / sizeof(lightPositions[0]); ++i)
-        {
-            glm::vec3 newPos = lightPositions[i] + glm::vec3(sin(glfwGetTime() * 5.0) * 5.0, 0.0, 0.0);
-            newPos = lightPositions[i];
-            shader.setVec3("lightPositions[" + std::to_string(i) + "]", newPos);
-            shader.setVec3("lightColors[" + std::to_string(i) + "]", lightColors[i]);
-
-            model = glm::mat4(1.0f);
-            model = glm::translate(model, newPos);
-            model = glm::scale(model, glm::vec3(0.5f));
-            shader.setMat4("model", model);
-            shader.setMat3("normalMatrix", glm::transpose(glm::inverse(glm::mat3(model))));
-            renderSphere();
-        }
-
-        // glfw: swap buffers and poll IO events (keys pressed/released, mouse moved etc.)
-        // -------------------------------------------------------------------------------
+        // 交换缓冲和轮询事件
         glfwSwapBuffers(window);
         glfwPollEvents();
     }
 
-    // glfw: terminate, clearing all previously allocated GLFW resources.
-    // ------------------------------------------------------------------
+    // 清理资源
+    glDeleteVertexArrays(1, &VAO);
+    glDeleteBuffers(1, &VBO);
     glfwTerminate();
     return 0;
 }
 
-// process all input: query GLFW whether relevant keys are pressed/released this frame and react accordingly
-// ---------------------------------------------------------------------------------------------------------
-void processInput(GLFWwindow *window)
-{
-    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
-        glfwSetWindowShouldClose(window, true);
-
-    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
-        camera.ProcessKeyboard(FORWARD, deltaTime);
-    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
-        camera.ProcessKeyboard(BACKWARD, deltaTime);
-    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
-        camera.ProcessKeyboard(LEFT, deltaTime);
-    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
-        camera.ProcessKeyboard(RIGHT, deltaTime);
-}
-
-// glfw: whenever the window size changed (by OS or user resize) this callback function executes
-// ---------------------------------------------------------------------------------------------
-void framebuffer_size_callback(GLFWwindow* window, int width, int height)
-{
-    // make sure the viewport matches the new window dimensions; note that width and 
-    // height will be significantly larger than specified on retina displays.
+void framebuffer_size_callback(GLFWwindow* window, int width, int height) {
     glViewport(0, 0, width, height);
 }
 
-
-// glfw: whenever the mouse moves, this callback is called
-// -------------------------------------------------------
-void mouse_callback(GLFWwindow* window, double xposIn, double yposIn)
-{
-    float xpos = static_cast<float>(xposIn);
-    float ypos = static_cast<float>(yposIn);
-
-    if (firstMouse)
-    {
+void mouse_callback(GLFWwindow* window, double xpos, double ypos) {
+    if (firstMouse) {
         lastX = xpos;
         lastY = ypos;
         firstMouse = false;
     }
 
     float xoffset = xpos - lastX;
-    float yoffset = lastY - ypos; // reversed since y-coordinates go from bottom to top
-
+    float yoffset =  ypos-lastY; // Y轴反转
     lastX = xpos;
     lastY = ypos;
 
-    camera.ProcessMouseMovement(xoffset, yoffset);
+    camera->processMouseMovement(xoffset, yoffset);
 }
 
-// glfw: whenever the mouse scroll wheel scrolls, this callback is called
-// ----------------------------------------------------------------------
-void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
-{
-    camera.ProcessMouseScroll(static_cast<float>(yoffset));
+void scroll_callback(GLFWwindow* window, double xoffset, double yoffset) {
+    camera->processMouseScroll(static_cast<float>(yoffset));
 }
 
-// renders (and builds at first invocation) a sphere
-// -------------------------------------------------
-unsigned int sphereVAO = 0;
-unsigned int indexCount;
-void renderSphere()
-{
-    if (sphereVAO == 0)
-    {
-        glGenVertexArrays(1, &sphereVAO);
+GLFWwindow* initWindow(int width, int height, const char* title) {
+    glfwInit();
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 6);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 
-        unsigned int vbo, ebo;
-        glGenBuffers(1, &vbo);
-        glGenBuffers(1, &ebo);
-
-        std::vector<glm::vec3> positions;
-        std::vector<glm::vec2> uv;
-        std::vector<glm::vec3> normals;
-        std::vector<unsigned int> indices;
-
-        const unsigned int X_SEGMENTS = 64;
-        const unsigned int Y_SEGMENTS = 64;
-        const float PI = 3.14159265359f;
-        for (unsigned int x = 0; x <= X_SEGMENTS; ++x)
-        {
-            for (unsigned int y = 0; y <= Y_SEGMENTS; ++y)
-            {
-                float xSegment = (float)x / (float)X_SEGMENTS;
-                float ySegment = (float)y / (float)Y_SEGMENTS;
-                float xPos = std::cos(xSegment * 2.0f * PI) * std::sin(ySegment * PI);
-                float yPos = std::cos(ySegment * PI);
-                float zPos = std::sin(xSegment * 2.0f * PI) * std::sin(ySegment * PI);
-
-                positions.push_back(glm::vec3(xPos, yPos, zPos));
-                uv.push_back(glm::vec2(xSegment, ySegment));
-                normals.push_back(glm::vec3(xPos, yPos, zPos));
-            }
-        }
-
-        bool oddRow = false;
-        for (unsigned int y = 0; y < Y_SEGMENTS; ++y)
-        {
-            if (!oddRow) // even rows: y == 0, y == 2; and so on
-            {
-                for (unsigned int x = 0; x <= X_SEGMENTS; ++x)
-                {
-                    indices.push_back(y       * (X_SEGMENTS + 1) + x);
-                    indices.push_back((y + 1) * (X_SEGMENTS + 1) + x);
-                }
-            }
-            else
-            {
-                for (int x = X_SEGMENTS; x >= 0; --x)
-                {
-                    indices.push_back((y + 1) * (X_SEGMENTS + 1) + x);
-                    indices.push_back(y       * (X_SEGMENTS + 1) + x);
-                }
-            }
-            oddRow = !oddRow;
-        }
-        indexCount = static_cast<unsigned int>(indices.size());
-
-        std::vector<float> data;
-        for (unsigned int i = 0; i < positions.size(); ++i)
-        {
-            data.push_back(positions[i].x);
-            data.push_back(positions[i].y);
-            data.push_back(positions[i].z);           
-            if (normals.size() > 0)
-            {
-                data.push_back(normals[i].x);
-                data.push_back(normals[i].y);
-                data.push_back(normals[i].z);
-            }
-            if (uv.size() > 0)
-            {
-                data.push_back(uv[i].x);
-                data.push_back(uv[i].y);
-            }
-        }
-        glBindVertexArray(sphereVAO);
-        glBindBuffer(GL_ARRAY_BUFFER, vbo);
-        glBufferData(GL_ARRAY_BUFFER, data.size() * sizeof(float), &data[0], GL_STATIC_DRAW);
-        glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, ebo);
-        glBufferData(GL_ELEMENT_ARRAY_BUFFER, indices.size() * sizeof(unsigned int), &indices[0], GL_STATIC_DRAW);
-        unsigned int stride = (3 + 2 + 3) * sizeof(float);
-        glEnableVertexAttribArray(0);
-        glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, stride, (void*)0);
-        glEnableVertexAttribArray(1);        
-        glVertexAttribPointer(1, 3, GL_FLOAT, GL_FALSE, stride, (void*)(3 * sizeof(float)));
-        glEnableVertexAttribArray(2);
-        glVertexAttribPointer(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)(6 * sizeof(float)));        
+    GLFWwindow* window = glfwCreateWindow(width, height, title, nullptr, nullptr);
+    if (!window) {
+        std::cerr << "Failed to create GLFW window" << std::endl;
+        glfwTerminate();
+        return nullptr;
     }
 
-    glBindVertexArray(sphereVAO);
-    glDrawElements(GL_TRIANGLE_STRIP, indexCount, GL_UNSIGNED_INT, 0);
+    glfwMakeContextCurrent(window);
+    glfwSetFramebufferSizeCallback(window, framebuffer_size_callback);
+    glfwSetCursorPosCallback(window, mouse_callback);
+    glfwSetScrollCallback(window, scroll_callback);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+
+    if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
+        std::cerr << "Failed to initialize GLAD" << std::endl;
+        return nullptr;
+    }
+
+    return window;
 }
 
-// utility function for loading a 2D texture from file
-// ---------------------------------------------------
+void processInput(GLFWwindow* window, float deltaTime) {
+    if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
+        glfwSetWindowShouldClose(window, true);
+
+    if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
+        camera->processKeyboard(GLFW_KEY_W, deltaTime);
+    if (glfwGetKey(window, GLFW_KEY_S) == GLFW_PRESS)
+        camera->processKeyboard(GLFW_KEY_S, deltaTime);
+    if (glfwGetKey(window, GLFW_KEY_A) == GLFW_PRESS)
+        camera->processKeyboard(GLFW_KEY_A, deltaTime);
+    if (glfwGetKey(window, GLFW_KEY_D) == GLFW_PRESS)
+        camera->processKeyboard(GLFW_KEY_D, deltaTime);
+}
+
+glm::quat myQuatLookAt(glm::vec3 direction, glm::vec3 up) {
+    // 确保方向向量是单位向量
+    direction = glm::normalize(direction);
+
+    // 计算右向量
+    glm::vec3 right = glm::normalize(glm::cross(direction, up));
+
+    // 重新正交化上向量
+    up = glm::normalize(glm::cross(right, direction));
+
+    // 构建旋转矩阵，这里可能需要调整方向，因为相机的视图矩阵是逆旋转
+    // 例如，视图矩阵的旋转部分是转置的，所以四元数可能直接由矩阵转置得到
+    glm::mat3 rotateMatrix;
+    rotateMatrix[0] = right;       // 右向量对应x轴
+    rotateMatrix[1] = up;          // 上向量对应y轴
+    rotateMatrix[2] = -direction;   // 前向量是-z轴方向
+
+    // 将旋转矩阵转换为四元数
+    glm::quat orientation = glm::quat_cast(rotateMatrix);
+
+    return orientation;
+}
+
 unsigned int loadTexture(char const * path)
 {
     unsigned int textureID;
